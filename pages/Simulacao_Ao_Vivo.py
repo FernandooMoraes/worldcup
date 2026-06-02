@@ -1,0 +1,837 @@
+from __future__ import annotations
+
+import html
+import os
+import sys
+import time
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from utils.data_loader import carregar_dados
+from utils.helpers import get_bandeira_url, inject_custom_css
+from utils.live_model import (
+    DefaultModelParams,
+    apply_group_result,
+    build_default_force_table,
+    build_round_of_32,
+    group_stage_records,
+    new_group_table,
+    rank_group,
+    simulate_match,
+)
+
+PHASE_LABELS = {
+    "groups": "Group Stage",
+    "round32": "Round of 32",
+    "round16": "Round of 16",
+    "quarters": "Quarterfinals",
+    "semis": "Semifinals",
+    "final": "Final",
+    "champion": "Champion",
+}
+
+NEXT_PHASE = {
+    "round32": "round16",
+    "round16": "quarters",
+    "quarters": "semis",
+    "semis": "final",
+    "final": "champion",
+}
+
+DELAY_BY_SPEED = {
+    "Slow": 0.85,
+    "Normal": 0.25,
+    "Fast": 0.08,
+    "Very fast": 0.0,
+}
+
+
+def inject_live_css() -> None:
+    st.markdown(
+        """
+<style>
+    h1, h2, h3 { letter-spacing: 0 !important; }
+    .block-container { padding-top: 1.35rem !important; max-width: 1500px; }
+
+    .live-hero {
+        background: linear-gradient(135deg, rgba(17,22,17,0.98), rgba(3,92,136,0.30));
+        border: 1px solid rgba(241,241,241,0.10);
+        border-radius: 8px;
+        padding: 1rem 1.15rem;
+        margin-bottom: 0.8rem;
+    }
+
+    .live-kicker {
+        color: #68E70F;
+        font-size: 0.78rem;
+        font-weight: 800;
+        text-transform: uppercase;
+    }
+
+    .live-title {
+        color: #F1F1F1;
+        font-family: 'Exo 2', sans-serif;
+        font-size: 2rem;
+        line-height: 1.05;
+        font-weight: 900;
+        margin: 0.25rem 0 0.4rem;
+    }
+
+    .live-subtitle {
+        color: #c9d1c9;
+        font-size: 0.95rem;
+        margin: 0;
+    }
+
+    .live-metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(120px, 1fr));
+        gap: 0.55rem;
+        margin-top: 0.85rem;
+    }
+
+    .live-metric {
+        background: rgba(255,255,255,0.055);
+        border: 1px solid rgba(241,241,241,0.08);
+        border-radius: 8px;
+        padding: 0.65rem;
+    }
+
+    .live-metric-label {
+        color: #92a092;
+        font-size: 0.72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+    }
+
+    .live-metric-value {
+        color: #F1F1F1;
+        font-size: 1.25rem;
+        font-weight: 900;
+        line-height: 1.1;
+        margin-top: 0.2rem;
+    }
+
+    .top-live-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.85fr);
+        gap: 0.75rem;
+        align-items: start;
+        margin-bottom: 0.8rem;
+    }
+
+    .current-match {
+        background: #111611;
+        border: 1px solid rgba(104,231,15,0.18);
+        border-left: 4px solid #68E70F;
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 0.8rem;
+        min-height: 275px;
+    }
+
+    .current-stage {
+        color: #FFCF26;
+        font-size: 0.8rem;
+        font-weight: 900;
+        text-transform: uppercase;
+        text-align: center;
+    }
+
+    .score-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+        align-items: center;
+        gap: 1rem;
+        margin-top: 0.9rem;
+    }
+
+    .team-side {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.65rem;
+        min-width: 0;
+        color: #F1F1F1;
+        font-weight: 900;
+        font-size: 1.15rem;
+        line-height: 1.15;
+        text-align: center;
+    }
+
+    .team-side.right { justify-content: center; text-align: center; }
+    .team-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .flag {
+        width: 28px;
+        height: 19px;
+        object-fit: cover;
+        border-radius: 3px;
+        flex: 0 0 auto;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.28);
+    }
+
+    .current-flag {
+        width: min(100%, 190px);
+        aspect-ratio: 3 / 2;
+        object-fit: cover;
+        border-radius: 6px;
+        flex: 0 0 auto;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.36);
+    }
+
+    .score {
+        color: #68E70F;
+        font-size: 3.6rem;
+        font-weight: 950;
+        line-height: 1;
+        min-width: 150px;
+        text-align: center;
+    }
+
+    .match-note {
+        color: #c9d1c9;
+        font-size: 0.82rem;
+        text-align: center;
+        margin-top: 0.45rem;
+    }
+
+    .groups-grid {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 0.55rem;
+    }
+
+    .group-card,
+    .mini-panel,
+    .history-card {
+        background: #111611;
+        border: 1px solid rgba(241,241,241,0.08);
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+    }
+
+    .group-title {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background: rgba(255,255,255,0.045);
+        color: #F1F1F1;
+        font-weight: 900;
+        padding: 0.45rem 0.55rem;
+    }
+
+    .group-title span {
+        color: #68E70F;
+        font-size: 0.78rem;
+        text-transform: uppercase;
+    }
+
+    .standings {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+        font-size: 0.72rem;
+    }
+
+    .standings th {
+        color: #92a092;
+        font-size: 0.68rem;
+        font-weight: 800;
+        text-transform: uppercase;
+        padding: 0.34rem 0.28rem;
+        border-bottom: 1px solid rgba(241,241,241,0.06);
+    }
+
+    .standings td {
+        color: #e8efe8;
+        padding: 0.34rem 0.22rem;
+        border-bottom: 1px solid rgba(241,241,241,0.045);
+        text-align: center;
+    }
+
+    .standings tr:last-child td { border-bottom: none; }
+    .standings .team-cell { text-align: left; width: 48%; }
+    .standings .qualified td:first-child { color: #68E70F; font-weight: 900; }
+
+    .compact-match {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 54px minmax(0, 1fr);
+        gap: 0.35rem;
+        align-items: center;
+        padding: 0.5rem;
+        border-bottom: 1px solid rgba(241,241,241,0.06);
+        color: #e8efe8;
+        font-size: 0.78rem;
+    }
+
+    .compact-match:last-child { border-bottom: none; }
+    .compact-score { color: #FFCF26; font-weight: 900; text-align: center; }
+    .compact-team { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .compact-team.right { text-align: right; }
+
+    .knockout-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 0.55rem;
+    }
+
+    .winner-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        color: #68E70F;
+        font-size: 0.75rem;
+        font-weight: 900;
+        margin-top: 0.4rem;
+    }
+
+    @media (max-width: 1250px) {
+        .groups-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 900px) {
+        .top-live-grid { grid-template-columns: 1fr; }
+        .live-metrics { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+        .score { font-size: 2.4rem; min-width: 100px; }
+        .current-flag { width: min(100%, 150px); }
+        .groups-grid { grid-template-columns: 1fr; }
+    }
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def esc(value: object) -> str:
+    return html.escape(str(value))
+
+
+def flag(team: str, bandeiras: dict[str, str], css_class: str = "flag") -> str:
+    return f'<img class="{css_class}" src="{esc(get_bandeira_url(team, bandeiras))}" alt="{esc(team)}">'
+
+
+def build_groups(force_df: pd.DataFrame) -> dict[str, list[str]]:
+    ordered = force_df.sort_values(["Grupo", "rank_forca"], ascending=[True, True])
+    return ordered.groupby("Grupo")["Teams"].apply(list).to_dict()
+
+
+def build_group_fixtures(groups: dict[str, list[str]]) -> list[dict]:
+    fixtures = []
+    for group in sorted(groups):
+        teams = groups[group]
+        for index_a, team_a in enumerate(teams):
+            for team_b in teams[index_a + 1 :]:
+                fixtures.append({"phase": "groups", "group": group, "team_a": team_a, "team_b": team_b})
+    return fixtures
+
+
+def phase_progress() -> tuple[int, int]:
+    phase = st.session_state.get("live_phase", "groups")
+    if phase == "groups":
+        return st.session_state.get("live_group_index", 0), len(st.session_state.get("live_group_fixtures", []))
+    if phase in NEXT_PHASE:
+        current_round = st.session_state.get("live_current_round", [])
+        played = len(st.session_state.get("live_current_phase_matches", []))
+        return played, max(1, len(current_round) // 2)
+    return 1, 1
+
+
+def render_hero(current_match: dict | None, total_matches: int, top_team: str) -> None:
+    phase = st.session_state.get("live_phase", "groups")
+    played, phase_total = phase_progress()
+    champion = st.session_state.get("live_campeao") or "-"
+    latest = current_match
+    title = "Live Simulation"
+    subtitle = "Default model: composite strength, average goals of 3.00, and Dixon-Coles enabled."
+    if latest:
+        subtitle = f"Latest match: {latest['team_a']} {latest['goals_a']} x {latest['goals_b']} {latest['team_b']}"
+
+    st.markdown(
+        f"""
+<div class="live-hero">
+    <div class="live-kicker">{esc(PHASE_LABELS.get(phase, phase))}</div>
+    <div class="live-title">{esc(title)}</div>
+    <p class="live-subtitle">{esc(subtitle)}</p>
+    <div class="live-metrics">
+        <div class="live-metric">
+            <div class="live-metric-label">Phase progress</div>
+            <div class="live-metric-value">{played}/{phase_total}</div>
+        </div>
+        <div class="live-metric">
+            <div class="live-metric-label">Simulated games</div>
+            <div class="live-metric-value">{total_matches}</div>
+        </div>
+        <div class="live-metric">
+            <div class="live-metric-label">Model favorite</div>
+            <div class="live-metric-value">{esc(top_team)}</div>
+        </div>
+        <div class="live-metric">
+            <div class="live-metric-label">Champion</div>
+            <div class="live-metric-value">{esc(champion)}</div>
+        </div>
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def render_current_match(match: dict | None, bandeiras: dict[str, str]) -> None:
+    if match is None:
+        st.markdown(
+            """
+<div class="current-match">
+    <div class="current-stage">Ready to start</div>
+    <div class="score-row">
+        <div class="team-side"><div class="current-flag" style="background: rgba(255,255,255,0.06);"></div><span class="team-name">Team A</span></div>
+        <div class="score">0 x 0</div>
+        <div class="team-side right"><div class="current-flag" style="background: rgba(255,255,255,0.06);"></div><span class="team-name">Team B</span></div>
+    </div>
+    <div class="match-note">Click on New Cup in the sidebar to follow the simulation in the full dashboard.</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+        return
+
+    note = match.get("group")
+    if note:
+        note = f"Group {note}"
+    elif match.get("penalty_winner"):
+        note = f"{match['penalty_winner']} advanced on penalties"
+    elif match.get("winner"):
+        note = f"{match['winner']} advanced"
+    else:
+        note = PHASE_LABELS.get(match.get("phase", ""), "")
+
+    st.markdown(
+        f"""
+<div class="current-match">
+    <div class="current-stage">{esc(PHASE_LABELS.get(match.get("phase"), match.get("phase", "")))}</div>
+    <div class="score-row">
+        <div class="team-side">{flag(match['team_a'], bandeiras, "current-flag")}<span class="team-name">{esc(match['team_a'])}</span></div>
+        <div class="score">{match['goals_a']} x {match['goals_b']}</div>
+        <div class="team-side right">{flag(match['team_b'], bandeiras, "current-flag")}<span class="team-name">{esc(match['team_b'])}</span></div>
+    </div>
+    <div class="match-note">{esc(note)}</div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def render_group_cards(group_tables: dict[str, dict[str, dict]], bandeiras: dict[str, str]) -> None:
+    cards = []
+    for group in sorted(group_tables):
+        rows = []
+        for position, record in enumerate(rank_group(group_tables[group]), start=1):
+            klass = "qualified" if position <= 2 else ""
+            rows.append(
+                f"""
+<tr class="{klass}">
+    <td>{position}</td>
+    <td class="team-cell">{flag(record['team'], bandeiras)}{esc(record['team'])}</td>
+    <td>{record['played']}</td>
+    <td><b>{record['points']}</b></td>
+    <td>{record['goal_diff']:+d}</td>
+    <td>{record['goals_for']}</td>
+</tr>
+"""
+            )
+        cards.append(
+            f"""
+<div class="group-card">
+    <div class="group-title">Group {esc(group)} <span>{sum(r['played'] for r in group_tables[group].values()) // 2}/6</span></div>
+    <table class="standings">
+        <thead>
+            <tr><th>#</th><th class="team-cell">Team</th><th>J</th><th>Pts</th><th>SG</th><th>GP</th></tr>
+        </thead>
+        <tbody>{''.join(rows)}</tbody>
+    </table>
+</div>
+"""
+        )
+    st.markdown(f'<div class="groups-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
+
+
+def render_recent_matches(matches: list[dict], bandeiras: dict[str, str], limit: int = 6) -> None:
+    recent = list(reversed(matches[-limit:]))
+    if not recent:
+        st.markdown('<div class="mini-panel"><div class="group-title">Recent games <span>0</span></div></div>', unsafe_allow_html=True)
+        return
+
+    rows = []
+    for match in recent:
+        suffix = ""
+        if match.get("penalty_winner"):
+            suffix = " pen"
+        rows.append(
+            f"""
+<div class="compact-match">
+    <div class="compact-team">{flag(match['team_a'], bandeiras)}{esc(match['team_a'])}</div>
+    <div class="compact-score">{match['goals_a']} x {match['goals_b']}{suffix}</div>
+    <div class="compact-team right">{esc(match['team_b'])}{flag(match['team_b'], bandeiras)}</div>
+</div>
+"""
+        )
+    st.markdown(
+        f"""
+<div class="mini-panel">
+    <div class="group-title">Recent games <span>{len(matches)}</span></div>
+    {''.join(rows)}
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def render_knockout(matches: list[dict], bandeiras: dict[str, str]) -> None:
+    if not matches:
+        return
+
+    cards = []
+    for match in matches:
+        winner = match.get("winner") or "-"
+        cards.append(
+            f"""
+<div class="group-card">
+    <div class="group-title">{esc(PHASE_LABELS.get(match.get('phase'), match.get('phase', '')))} <span>{esc(match.get('slot', ''))}</span></div>
+    <div class="compact-match">
+        <div class="compact-team">{flag(match['team_a'], bandeiras)}{esc(match['team_a'])}</div>
+        <div class="compact-score">{match['goals_a']} x {match['goals_b']}</div>
+        <div class="compact-team right">{esc(match['team_b'])}{flag(match['team_b'], bandeiras)}</div>
+    </div>
+    <div style="padding: 0 0.55rem 0.55rem;">
+        <span class="winner-chip">{flag(winner, bandeiras)}{esc(winner)}{esc(' (pen)' if match.get('penalty_winner') else '')}</span>
+    </div>
+</div>
+"""
+        )
+    st.markdown(f'<div class="knockout-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
+
+
+def render_history(bandeiras: dict[str, str]) -> None:
+    historico = st.session_state.get("historico_copas", [])
+    if not historico:
+        st.info("No simulated World Cup yet.")
+        return
+
+    campeoes = {}
+    for copa in historico:
+        campeoes[copa["campeao"]] = campeoes.get(copa["campeao"], 0) + 1
+
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("Cups", len(historico))
+    col_b.metric("Unique champions", len(campeoes))
+    maior = max(campeoes.items(), key=lambda item: item[1])
+    col_c.metric("Greatest champion", f"{maior[0]} ({maior[1]}x)")
+
+    for copa in reversed(historico[-6:]):
+        st.markdown(
+            f"""
+<div class="history-card" style="padding: 0.75rem; margin-bottom: 0.5rem;">
+    <div style="color:#92a092; font-size:0.78rem; font-weight:800;">Copa #{copa['edicao']} · {esc(copa['timestamp'])}</div>
+    <div style="color:#68E70F; font-size:1.05rem; font-weight:900; margin-top:0.2rem;">
+        {flag(copa['campeao'], bandeiras)}{esc(copa['campeao'])}
+    </div>
+    <div style="color:#c9d1c9; font-size:0.82rem;">Vice: {esc(copa['vice'])} · Final: {esc(copa['final_placar'])}</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+
+def initialize_new_cup(groups: dict[str, list[str]], strengths: dict[str, float]) -> None:
+    st.session_state["live_running"] = True
+    st.session_state["live_phase"] = "groups"
+    st.session_state["live_group_tables"] = new_group_table(groups, strengths)
+    st.session_state["live_group_fixtures"] = build_group_fixtures(groups)
+    st.session_state["live_group_index"] = 0
+    st.session_state["live_matches"] = []
+    st.session_state["live_knockout_matches"] = []
+    st.session_state["live_current_phase_matches"] = []
+    st.session_state["live_current_round"] = []
+    st.session_state["live_campeao"] = None
+    st.session_state["live_vice"] = None
+    st.session_state["live_semifinalistas"] = []
+    st.session_state["live_final_placar"] = None
+    st.session_state["live_seed"] = int(time.time_ns() % 2**32)
+
+
+def ensure_state(groups: dict[str, list[str]], strengths: dict[str, float]) -> None:
+    if "historico_copas" not in st.session_state:
+        st.session_state["historico_copas"] = []
+    if "live_running" not in st.session_state:
+        st.session_state["live_running"] = False
+    if "live_group_tables" not in st.session_state:
+        st.session_state["live_group_tables"] = new_group_table(groups, strengths)
+    if "live_matches" not in st.session_state:
+        st.session_state["live_matches"] = []
+    if "live_knockout_matches" not in st.session_state:
+        st.session_state["live_knockout_matches"] = []
+
+
+def render_all(
+    overview_slot,
+    current_slot,
+    groups_slot,
+    side_slot,
+    knockout_slot,
+    bandeiras: dict[str, str],
+    top_team: str,
+) -> None:
+    matches = st.session_state.get("live_matches", [])
+    current_match = matches[-1] if matches else None
+    with overview_slot.container():
+        render_hero(current_match, len(matches), top_team)
+    with current_slot.container():
+        render_current_match(current_match, bandeiras)
+    with groups_slot.container():
+        render_group_cards(st.session_state.get("live_group_tables", {}), bandeiras)
+    with side_slot.container():
+        render_recent_matches(matches, bandeiras)
+    with knockout_slot.container():
+        render_knockout(st.session_state.get("live_knockout_matches", []), bandeiras)
+
+
+def run_group_stage(
+    params: DefaultModelParams,
+    strengths: dict[str, float],
+    bandeiras: dict[str, str],
+    delay: float,
+    slots: tuple,
+    top_team: str,
+) -> None:
+    rng = np.random.default_rng(st.session_state["live_seed"] + len(st.session_state.get("live_matches", [])))
+    fixtures = st.session_state["live_group_fixtures"]
+    group_tables = st.session_state["live_group_tables"]
+
+    for index in range(st.session_state["live_group_index"], len(fixtures)):
+        fixture = fixtures[index]
+        match = simulate_match(
+            fixture["team_a"],
+            fixture["team_b"],
+            strengths,
+            rng,
+            params,
+            knockout=False,
+        )
+        match.update({"phase": "groups", "group": fixture["group"], "slot": f"{index + 1}/{len(fixtures)}"})
+        apply_group_result(group_tables[fixture["group"]], match, rng)
+        st.session_state["live_group_index"] = index + 1
+        st.session_state["live_matches"].append(match)
+
+        if delay > 0 or index == len(fixtures) - 1 or index % 8 == 0:
+            render_all(*slots, bandeiras, top_team)
+        if delay > 0:
+            time.sleep(delay)
+
+    records = group_stage_records(group_tables)
+    st.session_state["live_group_records"] = records
+    st.session_state["live_current_round"] = build_round_of_32(records, strengths)
+    st.session_state["live_current_phase_matches"] = []
+    st.session_state["live_phase"] = "round32"
+    st.rerun()
+
+
+def run_knockout_stage(
+    params: DefaultModelParams,
+    strengths: dict[str, float],
+    bandeiras: dict[str, str],
+    delay: float,
+    slots: tuple,
+    top_team: str,
+) -> None:
+    phase = st.session_state["live_phase"]
+    current_round = st.session_state.get("live_current_round", [])
+    rng = np.random.default_rng(st.session_state["live_seed"] + len(st.session_state.get("live_matches", [])) * 97)
+    winners = []
+    phase_matches = []
+
+    if phase == "semis":
+        st.session_state["live_semifinalistas"] = [row["team"] for row in current_round]
+
+    for slot_index in range(0, len(current_round), 2):
+        left = current_round[slot_index]
+        right = current_round[slot_index + 1]
+        match = simulate_match(left["team"], right["team"], strengths, rng, params, knockout=True)
+        winner_record = left if match["winner"] == left["team"] else right
+        loser_record = right if winner_record is left else left
+        winners.append(winner_record)
+
+        match.update(
+            {
+                "phase": phase,
+                "slot": f"{(slot_index // 2) + 1}/{len(current_round) // 2}",
+                "winner": winner_record["team"],
+            }
+        )
+        phase_matches.append(match)
+        st.session_state["live_current_phase_matches"] = phase_matches
+        st.session_state["live_knockout_matches"].append(match)
+        st.session_state["live_matches"].append(match)
+
+        if phase == "final":
+            suffix = " (pen)" if match.get("penalty_winner") else ""
+            st.session_state["live_final_placar"] = (
+                f"{match['team_a']} {match['goals_a']} x {match['goals_b']} {match['team_b']}{suffix}"
+            )
+            st.session_state["live_vice"] = loser_record["team"]
+
+        render_all(*slots, bandeiras, top_team)
+        if delay > 0:
+            time.sleep(delay * 1.7)
+
+    st.session_state["live_current_round"] = winners
+    if phase == "final":
+        st.session_state["live_campeao"] = winners[0]["team"]
+        st.session_state["live_phase"] = "champion"
+    else:
+        st.session_state["live_phase"] = NEXT_PHASE[phase]
+    st.session_state["live_current_phase_matches"] = []
+    st.rerun()
+
+
+def finish_cup(bandeiras: dict[str, str]) -> None:
+    st.session_state["live_running"] = False
+    champion = st.session_state.get("live_campeao")
+    if champion and not st.session_state.get("live_saved_result"):
+        st.session_state["historico_copas"].append(
+            {
+                "edicao": len(st.session_state.get("historico_copas", [])) + 1,
+                "campeao": champion,
+                "vice": st.session_state.get("live_vice", "N/A"),
+                "semifinalistas": st.session_state.get("live_semifinalistas", []),
+                "final_placar": st.session_state.get("live_final_placar", "N/A"),
+                "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+            }
+        )
+        st.session_state["live_saved_result"] = True
+
+    if champion:
+        vice = st.session_state.get("live_vice", "N/A")
+        st.markdown(
+            f"""
+<div class="live-hero" style="text-align:center; border-color: rgba(255,207,38,0.45);">
+    <div class="live-kicker">2026 World Cup Champion</div>
+    <div style="margin: 0.8rem 0;">{flag(champion, bandeiras, "flag")}</div>
+    <div class="live-title">{esc(champion)}</div>
+    <p class="live-subtitle">Vice: {esc(vice)} · Final: {esc(st.session_state.get('live_final_placar', 'N/A'))}</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+        st.balloons()
+
+
+inject_custom_css()
+inject_live_css()
+
+st.markdown("## Live World Cup Simulation")
+
+default_params = DefaultModelParams()
+with st.sidebar:
+    st.markdown("### Controls")
+    speed = st.select_slider("Speed", options=list(DELAY_BY_SPEED), value="Normal")
+    start_new_cup = st.button("New Cup", type="primary", use_container_width=True)
+    clear_history = st.button("Clear history", use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("### Model parameters")
+    col_w1, col_w2 = st.columns(2)
+    with col_w1:
+        weight_fifa = st.slider("FIFA", 0.0, 1.0, default_params.weight_fifa, 0.01)
+        weight_elo = st.slider("ELO", 0.0, 1.0, default_params.weight_elo, 0.01)
+        weight_history = st.slider("History", 0.0, 1.0, default_params.weight_history, 0.01)
+    with col_w2:
+        weight_market = st.slider("Market", 0.0, 1.0, default_params.weight_market, 0.01)
+        weight_momentum = st.slider("Moment", 0.0, 1.0, default_params.weight_momentum, 0.01)
+        weight_host = st.slider("Host", 0.0, 1.0, default_params.weight_host, 0.01)
+
+    media_gols = st.slider("Goal average", 0.5, 5.0, default_params.media_gols, 0.05)
+    col_m1, col_m2 = st.columns(2)
+    with col_m1:
+        offset = st.slider("Offset", 0.0, 1.0, default_params.offset, 0.01)
+    with col_m2:
+        elasticidade = st.slider("Elasticity", 0.1, 5.0, default_params.elasticidade, 0.01)
+
+    usar_dixon_coles = st.toggle("Dixon-Coles", value=default_params.usar_dixon_coles)
+    rho_dixon_coles = st.slider(
+        "Rho Dixon-Coles",
+        -0.30,
+        0.00,
+        default_params.rho_dixon_coles,
+        0.01,
+        disabled=not usar_dixon_coles,
+    )
+
+params = DefaultModelParams(
+    weight_fifa=weight_fifa,
+    weight_market=weight_market,
+    weight_elo=weight_elo,
+    weight_momentum=weight_momentum,
+    weight_history=weight_history,
+    weight_host=weight_host,
+    media_gols=media_gols,
+    offset=offset,
+    elasticidade=elasticidade,
+    usar_dixon_coles=usar_dixon_coles,
+    rho_dixon_coles=rho_dixon_coles,
+)
+
+try:
+    raw_df = carregar_dados()
+    force_df = build_default_force_table(raw_df, params)
+except Exception as error:
+    st.error(f"Error loading live simulation data: {error}")
+    st.stop()
+
+groups = build_groups(force_df)
+strengths = dict(zip(force_df["Teams"], force_df["forca_com_offset"]))
+bandeiras_dict = dict(zip(force_df["Teams"], force_df["Link_Bandeira"]))
+top_team = str(force_df.iloc[0]["Teams"])
+
+ensure_state(groups, strengths)
+
+if start_new_cup:
+    initialize_new_cup(groups, strengths)
+    st.session_state["live_saved_result"] = False
+
+if clear_history:
+    st.session_state["historico_copas"] = []
+    st.rerun()
+
+overview_slot = st.empty()
+top_left_col, top_right_col = st.columns([1.35, 0.85])
+with top_left_col:
+    current_slot = st.empty()
+with top_right_col:
+    side_slot = st.empty()
+
+st.markdown("### Groups")
+groups_slot = st.empty()
+st.markdown("### Knockout stage")
+knockout_slot = st.empty()
+
+slots = (overview_slot, current_slot, groups_slot, side_slot, knockout_slot)
+render_all(*slots, bandeiras_dict, top_team)
+
+if st.session_state.get("live_running"):
+    delay_value = DELAY_BY_SPEED[speed]
+    if st.session_state["live_phase"] == "groups":
+        run_group_stage(params, strengths, bandeiras_dict, delay_value, slots, top_team)
+    elif st.session_state["live_phase"] in NEXT_PHASE:
+        run_knockout_stage(params, strengths, bandeiras_dict, delay_value, slots, top_team)
+    elif st.session_state["live_phase"] == "champion":
+        finish_cup(bandeiras_dict)
+
+st.markdown("---")
+st.markdown("### History")
+render_history(bandeiras_dict)

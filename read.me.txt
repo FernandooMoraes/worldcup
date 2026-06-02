@@ -1,0 +1,23 @@
+- FIFA World Cup 2026 Prediction App
+
+Interactive Streamlit application for exploring team strength indicators and simulating the 2026 FIFA World Cup.
+
+- Installation
+
+Clone the repository or download the project files.
+
+Open a terminal and navigate to the project directory:
+
+cd previsao2026app-main
+
+- Install all required dependencies:
+
+pip install -r requirements.txt
+
+- Running the Application
+
+After installing the dependencies, start the Streamlit application:
+
+streamlit run app.py
+
+Streamlit will automatically open the application in your default web browser.
